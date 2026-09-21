@@ -1,1 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Walkabout Capture</title>
+<!--
+  ============================================================
+  wp-capture — the camera half of Walkabout (see Walkabout's
+  CaptureQueue.js for the other half, and the project doc's 2026-09-16
+  round for the full story of why this exists).
 
+  WHAT THIS PAGE IS DELIBERATELY NOT: it has no Walkabout data at all.
+  No roster, no assignment list, no manifest, nothing fetched from the
+  Walkabout Sheet. The only thing it ever learns is the assignment ID
+  already sitting inside the printed page's own corner QR codes — the
+  same four codes Walkabout's Scan tab decodes, decoded here with the
+  exact same crop-and-jsQR approach, for two reasons at once: (1) if all
+  four decode, the photo is sharp/flat/framed well enough to be usable —
+  that IS the quality bar, not a separate blur heuristic — and (2) that
+  decode is also how this page learns which assignment to name the file
+  after, without ever being told.
+
+  WHY A SEPARATE PAGE AT ALL: Apps Script serves Walkabout inside an
+  HtmlService iframe with an opaque origin, and browsers refuse to grant
+  getUserMedia (live camera) permission to an opaque-origin iframe — a
+  real Google-platform restriction, not a bug in Walkabout. A plain page
+  hosted here, at a normal top-level origin, doesn't have that problem.
+
+  SETUP THIS PAGE NEEDS (one-time, by Brian, not by this file):
+    1. A Google Cloud OAuth 2.0 Client ID (Web application), with this
+       page's exact URL added under "Authorized JavaScript origins" —
+       https://bvillards.github.io  (origin only, no path).
+    2. Paste that client ID into CLIENT_ID below.
+    3. OAuth consent screen set to "Testing" with your own account
+       listed as a test user — sidesteps Google's review process
+       entirely since this never needs to work for anyone but you.
+    4. Open this page once, click "Connect Google Drive," approve the
+       (narrow, drive.file-only) permission. This page then creates its
+       OWN "Walkabout Captures" folder — it has to be this page that
+       creates it, not Walkabout, because the drive.file scope only ever
+       sees files/folders THIS app created (see CaptureQueue.js's own
+       comment on getCapturesFolder_ for the other half of that
+       reasoning). The folder ID appears on screen after that — copy it
+       into Walkabout's WA_CAPTURES_FOLDER_ID Script Property once and
+       the two sides are linked for good; this page remembers the ID
+       itself afterward (localStorage, this browser only).
+
+  HONESTY NOTE, same discipline as every "never run against real
+  hardware yet" caveat elsewhere in this project: this has been reasoned
+  through carefully but never actually run against a real camera, a real
+  printed page, or a real Google Cloud OAuth client. Treat the corner-
+  crop fractions and JPEG quality below as starting points, same as
+  Walkabout's own ink-sampling thresholds.
+  ============================================================
+-->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root {
+    --bg: #f4f1e8; --card: #ffffff; --border: #e3ddcc; --ink: #241708;
+    --muted: #6b5636; --accent: #241708; --good: #2f5d34; --warn: #b88a11; --bad: #a83232;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; background: var(--bg); color: var(--ink); margin: 0; }
+  .app { max-width: 640px; margin: 0 auto; padding: 18px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { font-size: 13px; color: var(--muted); margin: 0 0 18px; }
+  .card { border: 1.5px solid var(--border); border-radius: 10px; padding: 16px; background: var(--card); margin-bottom: 16px; }
+  button { font-size: 14px; padding: 10px 18px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fdfcf9; cursor: pointer; }
+  button.secondary { background: #fff; color: var(--ink); border-color: var(--border); }
+  button:disabled { opacity: .4; cursor: default; }
+  .status-line { font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 18px; white-space: pre-line; }
+  .status-line.error { color: var(--bad); }
+  .status-line.good { color: var(--good); }
+  .camStage { position: relative; border-radius: 8px; overflow: hidden; background: #111; }
+  video, canvas { width: 100%; display: block; }
+  canvas { display: none; }
+  /* Corner framing guide — purely visual, doesn't affect the actual
+     decode (that always scans the real 32%-of-frame corner crops
+     regardless of where these brackets are drawn) — it's here so a
+     teacher can see roughly where the printed page's own corner squares
+     need to land before pressing Capture, the actual usability fix this
+     whole page exists for. */
+  .frameGuide { position: absolute; inset: 0; pointer-events: none; }
+  .frameGuide .corner { position: absolute; width: 15%; height: 15%; border: 3px solid rgba(255,255,255,.85); }
+  .frameGuide .tl { top: 4%; left: 4%; border-right: none; border-bottom: none; }
+  .frameGuide .tr { top: 4%; right: 4%; border-left: none; border-bottom: none; }
+  .frameGuide .bl { bottom: 4%; left: 4%; border-right: none; border-top: none; }
+  .frameGuide .br { bottom: 4%; right: 4%; border-left: none; border-top: none; }
+  .log { font-size: 12px; color: var(--muted); margin-top: 10px; max-height: 160px; overflow-y: auto; }
+  .log div { padding: 3px 0; border-bottom: 1px solid var(--border); }
+  .log div.good { color: var(--good); }
+  .log div.bad { color: var(--bad); }
+  code.folderId { display: block; background: #f4f1e8; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px; margin-top: 8px; word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Walkabout Capture</h1>
+  <p class="sub">Carries no roster or assignment data — it only reads the printed page's own corner codes and drops the photo in Drive.</p>
+
+  <div class="card" id="setup-card">
+    <div id="setup-not-connected">
+      <button type="button" id="connect-btn">Connect Google Drive</button>
+      <div class="status-line" id="setup-status"></div>
+    </div>
+    <div id="setup-connected" hidden>
+      <div class="status-line good">Connected. Captures folder:</div>
+      <code class="folderId" id="folder-id-display"></code>
+      <p class="sub" style="margin:8px 0 0;">First time only — paste that ID into Walkabout's <code>WA_CAPTURES_FOLDER_ID</code> Script Property so it knows where to look.</p>
+    </div>
+  </div>
+
+  <div class="card" id="camera-card" hidden>
+    <div class="camStage">
+      <video id="video" autoplay playsinline></video>
+      <canvas id="canvas"></canvas>
+      <div class="frameGuide">
+        <div class="corner tl"></div><div class="corner tr"></div>
+        <div class="corner bl"></div><div class="corner br"></div>
+      </div>
+    </div>
+    <p class="sub" style="margin-top:8px;">Line the printed page's four corner squares up with the brackets above, then Capture. A photo that doesn't read all four corners is rejected automatically and never uploaded — retake it.</p>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button type="button" id="capture-btn">Capture</button>
+      <button type="button" class="secondary" id="stop-btn">Stop camera</button>
+    </div>
+    <div class="status-line" id="capture-status"></div>
+    <div class="log" id="capture-log"></div>
+  </div>
+</div>
+
+<script>
+  // ── Fill this in once, from Google Cloud Console (see the header
+  // comment above for the exact steps) — a bare OAuth 2.0 Web application
+  // Client ID, nothing secret (this is a browser-only page, there's no
+  // client secret to protect).
+  const CLIENT_ID = 'REPLACE_WITH_YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com';
+
+  // Narrowest scope that can create/write its own folder and files —
+  // deliberately NOT full Drive access. See the header comment on why
+  // this means the folder has to be created BY this page, not handed to
+  // it by Walkabout.
+  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+
+  const FOLDER_ID_STORAGE_KEY = 'wp_capture_folder_id';
+  const FOLDER_NAME = 'Walkabout Captures';
+
+  let accessToken = null;
+  let tokenClient = null;
+  let folderId = localStorage.getItem(FOLDER_ID_STORAGE_KEY) || null;
+  let stream = null;
+
+  function setStatus(elId, message, kind) {
+    const el = document.getElementById(elId);
+    el.textContent = message;
+    el.className = 'status-line' + (kind ? ' ' + kind : '');
+  }
+
+  function logLine(message, kind) {
+    const log = document.getElementById('capture-log');
+    const div = document.createElement('div');
+    div.className = kind || '';
+    div.textContent = new Date().toLocaleTimeString() + ' — ' + message;
+    log.insertBefore(div, log.firstChild);
+  }
+
+  // ── Auth + folder bootstrap ───────────────────────────────────
+  window.addEventListener('load', () => {
+    if (!window.google || !google.accounts || !google.accounts.oauth2) {
+      setStatus('setup-status', 'Could not load Google\'s sign-in library — check your connection and reload.', 'error');
+      return;
+    }
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: CLIENT_ID,
+      scope: DRIVE_SCOPE,
+      callback: (resp) => {
+        if (resp.error) { setStatus('setup-status', 'Google Drive sign-in failed: ' + resp.error, 'error'); return; }
+        accessToken = resp.access_token;
+        onConnected_();
+      }
+    });
+  });
+
+  document.getElementById('connect-btn').addEventListener('click', () => {
+    if (CLIENT_ID.indexOf('REPLACE_WITH') === 0) {
+      setStatus('setup-status', 'This page needs its own Google Cloud OAuth Client ID pasted into CLIENT_ID first — see the comment at the top of this file\'s source.', 'error');
+      return;
+    }
+    setStatus('setup-status', 'Opening Google\'s sign-in…', '');
+    tokenClient.requestAccessToken({ prompt: folderId ? '' : 'consent' });
+  });
+
+  async function onConnected_() {
+    setStatus('setup-status', 'Connected — checking Drive folder…', '');
+    try {
+      if (folderId) {
+        const ok = await driveFolderStillValid_(folderId);
+        if (!ok) folderId = null;
+      }
+      if (!folderId) {
+        folderId = await createCapturesFolder_();
+        localStorage.setItem(FOLDER_ID_STORAGE_KEY, folderId);
+      }
+      document.getElementById('setup-not-connected').hidden = true;
+      document.getElementById('setup-connected').hidden = false;
+      document.getElementById('folder-id-display').textContent = folderId;
+      document.getElementById('camera-card').hidden = false;
+    } catch (e) {
+      setStatus('setup-status', 'Could not set up the Drive folder: ' + e.message, 'error');
+    }
+  }
+
+  async function driveApiFetch_(url, options) {
+    options = options || {};
+    options.headers = Object.assign({ Authorization: 'Bearer ' + accessToken }, options.headers || {});
+    const resp = await fetch(url, options);
+    if (resp.status === 401) {
+      // Token expired (they last ~1hr) — re-request silently (no consent
+      // prompt needed once granted once) and let the CALLER retry;
+      // simplest correct thing for a personal, single-user page is to
+      // ask the teacher to press Connect again rather than chaining
+      // retries here.
+      accessToken = null;
+      throw new Error('Your Google Drive connection expired — click "Connect Google Drive" again.');
+    }
+    return resp;
+  }
+
+  async function driveFolderStillValid_(id) {
+    try {
+      const resp = await driveApiFetch_('https://www.googleapis.com/drive/v3/files/' + id + '?fields=id,trashed');
+      if (!resp.ok) return false;
+      const data = await resp.json();
+      return !data.trashed;
+    } catch (e) { return false; }
+  }
+
+  async function createCapturesFolder_() {
+    const resp = await driveApiFetch_('https://www.googleapis.com/drive/v3/files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' })
+    });
+    if (!resp.ok) throw new Error('Drive folder creation failed (HTTP ' + resp.status + ')');
+    const data = await resp.json();
+    return data.id;
+  }
+
+  // ── Camera ───────────────────────────────────────────────────
+  document.getElementById('stop-btn').addEventListener('click', stopCamera_);
+  window.addEventListener('load', startCameraWhenReady_);
+
+  // Starts the camera as soon as the Drive side is connected, rather
+  // than needing a second button press — "turn it on, it's ready,"
+  // matching the appliance-like feel this page is meant to have.
+  function startCameraWhenReady_() {
+    const check = setInterval(() => {
+      if (!document.getElementById('camera-card').hidden) {
+        clearInterval(check);
+        startCamera_();
+      }
+    }, 300);
+  }
+
+  async function startCamera_() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1920 } } });
+      document.getElementById('video').srcObject = stream;
+      setStatus('capture-status', 'Camera ready.', '');
+    } catch (e) {
+      setStatus('capture-status', 'Could not access the camera: ' + e.message, 'error');
+    }
+  }
+
+  function stopCamera_() {
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    setStatus('capture-status', 'Camera stopped.', '');
+  }
+
+  // ── Corner check — identical crop/decode approach to Walkabout's own
+  // detectCorner_ (SharedJs.html), kept in sync by hand since this page
+  // has no way to share code with the Apps Script project directly. If
+  // you change one, change the other. ──
+  function detectCorner_(ctx, fullW, fullH, corner) {
+    const fracW = fullW * 0.32, fracH = fullH * 0.32;
+    let cropX, cropY;
+    if (corner === 'tl') { cropX = 0; cropY = 0; }
+    else if (corner === 'tr') { cropX = fullW - fracW; cropY = 0; }
+    else if (corner === 'bl') { cropX = 0; cropY = fullH - fracH; }
+    else { cropX = fullW - fracW; cropY = fullH - fracH; }
+
+    const imageData = ctx.getImageData(cropX, cropY, fracW, fracH);
+    const code = jsQR(imageData.data, imageData.width, imageData.height);
+    if (!code) return null;
+    let payload;
+    try { payload = JSON.parse(code.data); } catch (e) { return null; }
+    if (payload.c !== corner) return null;
+    return { assignmentId: payload.a };
+  }
+
+  document.getElementById('capture-btn').addEventListener('click', async () => {
+    const video = document.getElementById('video');
+    if (!video.videoWidth) { setStatus('capture-status', 'Camera not ready yet.', 'error'); return; }
+    if (!accessToken) { setStatus('capture-status', 'Not connected to Drive — click "Connect Google Drive" above.', 'error'); return; }
+
+    const canvas = document.getElementById('canvas');
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    const ctx = canvas.getContext('2d');
+
+    setStatus('capture-status', 'Reading corner markers…', '');
+    const corners = ['tl', 'tr', 'bl', 'br'];
+    const detected = {};
+    corners.forEach(c => { const d = detectCorner_(ctx, canvas.width, canvas.height, c); if (d) detected[c] = d; });
+    const found = Object.keys(detected);
+
+    if (found.length < 4) {
+      const msg = 'Only found ' + found.length + ' of 4 corners (' + found.join(', ') + ') — not sharp/flat/framed enough. Retake.';
+      setStatus('capture-status', msg, 'error');
+      logLine(msg, 'bad');
+      return;
+    }
+    const ids = new Set(found.map(c => detected[c].assignmentId));
+    if (ids.size > 1) {
+      const msg = 'Corners disagree on which assignment this is — retake with just one printed page in frame.';
+      setStatus('capture-status', msg, 'error');
+      logLine(msg, 'bad');
+      return;
+    }
+    const assignmentId = detected.tl.assignmentId;
+    if (!assignmentId) {
+      const msg = 'Corners decoded but carried no assignment ID — is this an old/blank test page?';
+      setStatus('capture-status', msg, 'error');
+      logLine(msg, 'bad');
+      return;
+    }
+
+    setStatus('capture-status', 'Uploading…', '');
+    try {
+      const filename = assignmentId + '__' + new Date().toISOString().replace(/[:.]/g, '-') + '.jpg';
+      await uploadCapture_(canvas, filename);
+      setStatus('capture-status', 'Uploaded ' + filename + '. Ready for the next page.', 'good');
+      logLine('Uploaded ' + filename, 'good');
+    } catch (e) {
+      setStatus('capture-status', 'Upload failed: ' + e.message, 'error');
+      logLine('Upload failed (' + assignmentId + '): ' + e.message, 'bad');
+    }
+  });
+
+  function canvasToBlob_(canvas, quality) {
+    return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+  }
+
+  // Multipart upload (metadata + file bytes in one request) straight to
+  // Drive v3 — no Apps Script involved at all on this path.
+  async function uploadCapture_(canvas, filename) {
+    const blob = await canvasToBlob_(canvas, 0.85);
+    const metadata = { name: filename, parents: [folderId], mimeType: 'image/jpeg' };
+    const boundary = 'wpcapture' + Math.random().toString(36).slice(2);
+    const metaPart = '--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata) + '\r\n';
+    const filePartHeader = '--' + boundary + '\r\nContent-Type: image/jpeg\r\n\r\n';
+    const closing = '\r\n--' + boundary + '--';
+
+    const body = new Blob([metaPart, filePartHeader, blob, closing], { type: 'multipart/related; boundary=' + boundary });
+
+    const resp = await driveApiFetch_('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
+      body: body
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp.json();
+  }
+</script>
+</body>
+</html>
