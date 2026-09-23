@@ -14,8 +14,9 @@
   No roster, no assignment list, no manifest, nothing fetched from the
   Walkabout Sheet. The only thing it ever learns is the assignment ID
   already sitting inside the printed page's own corner QR codes — the
-  same four codes Walkabout's Scan tab decodes, decoded here with the
-  exact same crop-and-jsQR approach, for two reasons at once: (1) if all
+  same four codes Walkabout's Scan tab decodes, decoded here (as of
+  2026-09-23, by scanning the whole photo — see the update note below,
+  not a fixed crop) for two reasons at once: (1) if all
   four decode, the photo is sharp/flat/framed well enough to be usable —
   that IS the quality bar, not a separate blur heuristic — and (2) that
   decode is also how this page learns which assignment to name the file
@@ -56,12 +57,21 @@
     That's it — no Google Cloud project, no OAuth client, no consent
     screen, no personal account anywhere in this file.
 
-  HONESTY NOTE, same discipline as every "never run against real
-  hardware yet" caveat elsewhere in this project: this has been reasoned
-  through carefully but never actually run against a real camera, a real
-  printed page, or a real Apps Script deployment. Treat the corner-crop
-  fractions and JPEG quality below as starting points, same as
-  Walkabout's own ink-sampling thresholds.
+  UPDATED 2026-09-23 -- WHOLE-PHOTO SCAN, NOT A FIXED CROP: the four
+  corner QR codes now get found by scanning the ENTIRE captured photo in
+  overlapping tiles, not by cropping the outer 32% of each image corner
+  and hoping the printed page landed exactly there. Confirmed directly
+  against real webcam test photos: the old fixed-crop approach found 0
+  of 4 corners on two of three test pages (the codes were perfectly
+  readable -- jsQR decoded every one of them once actually searched for
+  in the right place) and only found all 4 on the third by luck of how
+  the photo happened to be framed. The corner QR payload is also now
+  plain text ("<code>-TL" etc.) instead of JSON, since a corner's role
+  no longer needs to be inferred from crop position -- it's read
+  straight off the decoded text. See the project doc's "Walking Paper"
+  entries around this date for the full diagnostic. This IS now run
+  against real capture hardware (a real webcam, real jsQR) -- see that
+  same doc entry for exactly what was tested.
   ============================================================
 -->
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
@@ -85,12 +95,11 @@
   .camStage { position: relative; border-radius: 8px; overflow: hidden; background: #111; }
   video, canvas { width: 100%; display: block; }
   canvas { display: none; }
-  /* Corner framing guide — purely visual, doesn't affect the actual
-     decode (that always scans the real 32%-of-frame corner crops
-     regardless of where these brackets are drawn) — it's here so a
-     teacher can see roughly where the printed page's own corner squares
-     need to land before pressing Capture, the actual usability fix this
-     whole page exists for. */
+  /* Corner framing guide — purely visual. The decode now scans the
+     WHOLE photo in overlapping tiles (2026-09-23), so the page no
+     longer needs to land in any exact spot for the corners to be found
+     — this is just a loose "keep the whole page in frame" guide, not a
+     precision requirement any more. */
   .frameGuide { position: absolute; inset: 0; pointer-events: none; }
   .frameGuide .corner { position: absolute; width: 15%; height: 15%; border: 3px solid rgba(255,255,255,.85); }
   .frameGuide .tl { top: 4%; left: 4%; border-right: none; border-bottom: none; }
@@ -117,7 +126,7 @@
         <div class="corner bl"></div><div class="corner br"></div>
       </div>
     </div>
-    <p class="sub" style="margin-top:8px;">Line the printed page's four corner squares up with the brackets above, then Capture. A photo that doesn't read all four corners is rejected automatically and never sent — retake it.</p>
+    <p class="sub" style="margin-top:8px;">Make sure the whole printed page is in frame and reasonably sharp, then Capture. A photo that doesn't read all four corner codes is rejected automatically and never sent — retake it.</p>
     <div style="display:flex; gap:8px; margin-top:8px;">
       <button type="button" id="capture-btn">Capture</button>
       <button type="button" class="secondary" id="stop-btn">Stop camera</button>
@@ -134,8 +143,8 @@
   // something a browser can keep confidential — SHARED_SECRET ships
   // readable in this page's own source, same trust tier as the corner-QR
   // shape check below, not a login.
-  const WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbyJZqfzN-JoHPjX4JQyym-7e8zFjN2lXA3RYeK4FRnimPH1BJ4atC9DGxSlmDPed20P/exec';
-  const SHARED_SECRET = '3e76edc5a83298102dc70ad638ad23b288639006';
+  const WEBAPP_URL = 'REPLACE_WITH_YOUR_CAPTURE_DEPLOYMENT_EXEC_URL';
+  const SHARED_SECRET = 'REPLACE_WITH_YOUR_WA_CAPTURE_SHARED_SECRET';
 
   let stream = null;
 
@@ -175,25 +184,38 @@
     setStatus('capture-status', 'Camera stopped.', '');
   }
 
-  // ── Corner check — identical crop/decode approach to Walkabout's own
-  // detectCorner_ (SharedJs.html), kept in sync by hand since this page
-  // has no way to share code with the Apps Script project directly. If
-  // you change one, change the other. ──
-  function detectCorner_(ctx, fullW, fullH, corner) {
-    const fracW = fullW * 0.32, fracH = fullH * 0.32;
-    let cropX, cropY;
-    if (corner === 'tl') { cropX = 0; cropY = 0; }
-    else if (corner === 'tr') { cropX = fullW - fracW; cropY = 0; }
-    else if (corner === 'bl') { cropX = 0; cropY = fullH - fracH; }
-    else { cropX = fullW - fracW; cropY = fullH - fracH; }
+  // ── Whole-photo corner scan (2026-09-23 rewrite, see header note) ──
+  // Kept in sync by hand with Walkabout's own copy in SharedJs.html — if
+  // you change one, change the other.
+  function scanWholePhotoForCodes_(canvas, tileFrac, overlapFrac) {
+    tileFrac = tileFrac || 0.4;
+    overlapFrac = overlapFrac || 0.15;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    const tileW = Math.floor(w * tileFrac), tileH = Math.floor(h * tileFrac);
+    const stepX = Math.floor(tileW * (1 - overlapFrac)), stepY = Math.floor(tileH * (1 - overlapFrac));
+    const foundByText = {};
+    for (let y = 0; ; y += stepY) {
+      const yy = Math.min(y, h - tileH);
+      for (let x = 0; ; x += stepX) {
+        const xx = Math.min(x, w - tileW);
+        const imageData = ctx.getImageData(xx, yy, tileW, tileH);
+        const code = jsQR(imageData.data, tileW, tileH);
+        if (code && !(code.data in foundByText)) foundByText[code.data] = code;
+        if (xx >= w - tileW) break;
+      }
+      if (yy >= h - tileH) break;
+    }
+    return foundByText; // { "<shortCode>-TL": {data, location, ...}, ... }
+  }
 
-    const imageData = ctx.getImageData(cropX, cropY, fracW, fracH);
-    const code = jsQR(imageData.data, imageData.width, imageData.height);
-    if (!code) return null;
-    let payload;
-    try { payload = JSON.parse(code.data); } catch (e) { return null; }
-    if (payload.c !== corner) return null;
-    return { assignmentId: payload.a };
+  // Parses one decoded string as "<shortCode>-<corner>". Returns null if
+  // it doesn't match that shape (noise, or an old-format JSON code from
+  // a page printed before this rewrite).
+  function parseCornerPayload_(text) {
+    const m = /^(.+)-(TL|TR|BL|BR)$/.exec(text);
+    if (!m) return null;
+    return { shortCode: m[1], corner: m[2] };
   }
 
   document.getElementById('capture-btn').addEventListener('click', async () => {
@@ -207,34 +229,31 @@
     const canvas = document.getElementById('canvas');
     canvas.width = video.videoWidth; canvas.height = video.videoHeight;
     canvas.getContext('2d').drawImage(video, 0, 0);
-    const ctx = canvas.getContext('2d');
 
     setStatus('capture-status', 'Reading corner markers…', '');
-    const corners = ['tl', 'tr', 'bl', 'br'];
-    const detected = {};
-    corners.forEach(c => { const d = detectCorner_(ctx, canvas.width, canvas.height, c); if (d) detected[c] = d; });
-    const found = Object.keys(detected);
+    const rawFound = scanWholePhotoForCodes_(canvas);
+    const byCorner = {};
+    Object.keys(rawFound).forEach(text => {
+      const parsed = parseCornerPayload_(text);
+      if (parsed) byCorner[parsed.corner] = parsed.shortCode;
+    });
+    const cornersFound = Object.keys(byCorner);
 
-    if (found.length < 4) {
-      const msg = 'Only found ' + found.length + ' of 4 corners (' + found.join(', ') + ') — not sharp/flat/framed enough. Retake.';
+    if (cornersFound.length < 4) {
+      const missing = ['TL', 'TR', 'BL', 'BR'].filter(c => !byCorner[c]);
+      const msg = 'Found ' + cornersFound.length + ' of 4 corners (missing ' + missing.join(', ') + '). Retake — try better light or holding the page flatter.';
       setStatus('capture-status', msg, 'error');
       logLine(msg, 'bad');
       return;
     }
-    const ids = new Set(found.map(c => detected[c].assignmentId));
-    if (ids.size > 1) {
+    const shortCodes = new Set(Object.values(byCorner));
+    if (shortCodes.size > 1) {
       const msg = 'Corners disagree on which assignment this is — retake with just one printed page in frame.';
       setStatus('capture-status', msg, 'error');
       logLine(msg, 'bad');
       return;
     }
-    const assignmentId = detected.tl.assignmentId;
-    if (!assignmentId) {
-      const msg = 'Corners decoded but carried no assignment ID — is this an old/blank test page?';
-      setStatus('capture-status', msg, 'error');
-      logLine(msg, 'bad');
-      return;
-    }
+    const assignmentId = byCorner.TL;
 
     setStatus('capture-status', 'Sending…', '');
     try {
