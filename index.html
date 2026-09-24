@@ -1,3 +1,5 @@
+
+Index 1 · HTML
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9,7 +11,7 @@
   wp-capture — the camera half of Walkabout (see Walkabout's
   CaptureQueue.js for the other half, and the project doc's 2026-09-16
   and 2026-09-21 rounds for the full story of why this exists).
-
+ 
   WHAT THIS PAGE IS DELIBERATELY NOT: it has no Walkabout data at all.
   No roster, no assignment list, no manifest, nothing fetched from the
   Walkabout Sheet. The only thing it ever learns is the assignment ID
@@ -21,13 +23,13 @@
   that IS the quality bar, not a separate blur heuristic — and (2) that
   decode is also how this page learns which assignment to name the file
   after, without ever being told.
-
+ 
   WHY A SEPARATE PAGE AT ALL: Apps Script serves Walkabout inside an
   HtmlService iframe with an opaque origin, and browsers refuse to grant
   getUserMedia (live camera) permission to an opaque-origin iframe — a
   real Google-platform restriction, not a bug in Walkabout. A plain page
   hosted here, at a normal top-level origin, doesn't have that problem.
-
+ 
   REVISED 2026-09-21 — NO GOOGLE SIGN-IN, ON PURPOSE: the original design
   had this page sign in to Google Drive itself (its own OAuth Client ID,
   its own drive.file grant) and upload directly. Brian's school account
@@ -39,7 +41,7 @@
   endpoint), which writes to Drive under Walkabout's existing identity —
   the same one that already owns the gradebook. Nothing here ever signs
   in to anything.
-
+ 
   SETUP THIS PAGE NEEDS (one-time, by Brian, not by this file — see the
   published setup guide for the full walkthrough):
     1. In Walkabout's Apps Script project: Deploy → New deployment →
@@ -56,7 +58,7 @@
        clean of drive-by traffic.
     That's it — no Google Cloud project, no OAuth client, no consent
     screen, no personal account anywhere in this file.
-
+ 
   UPDATED 2026-09-23 -- WHOLE-PHOTO SCAN, NOT A FIXED CROP: the four
   corner QR codes now get found by scanning the ENTIRE captured photo in
   overlapping tiles, not by cropping the outer 32% of each image corner
@@ -92,6 +94,7 @@
   .status-line { font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 18px; white-space: pre-line; }
   .status-line.error { color: var(--bad); }
   .status-line.good { color: var(--good); }
+  .status-line.warn { color: var(--warn); }
   .camStage { position: relative; border-radius: 8px; overflow: hidden; background: #111; }
   video, canvas { width: 100%; display: block; }
   canvas { display: none; }
@@ -116,7 +119,7 @@
 <div class="app">
   <h1>Walkabout Capture</h1>
   <p class="sub">Carries no roster or assignment data, and never signs in to anything — it only reads the printed page's own corner codes and sends the photo straight to Walkabout.</p>
-
+ 
   <div class="card" id="camera-card">
     <div class="camStage">
       <video id="video" autoplay playsinline></video>
@@ -135,7 +138,7 @@
     <div class="log" id="capture-log"></div>
   </div>
 </div>
-
+ 
 <script>
   // ── Fill these in once (see the header comment above for the exact
   // steps) — both come from Walkabout's own Apps Script project, never
@@ -147,13 +150,13 @@
   const SHARED_SECRET = '3e76edc5a83298102dc70ad638ad23b288639006';
 
   let stream = null;
-
+ 
   function setStatus(elId, message, kind) {
     const el = document.getElementById(elId);
     el.textContent = message;
     el.className = 'status-line' + (kind ? ' ' + kind : '');
   }
-
+ 
   function logLine(message, kind) {
     const log = document.getElementById('capture-log');
     const div = document.createElement('div');
@@ -161,14 +164,14 @@
     div.textContent = new Date().toLocaleTimeString() + ' — ' + message;
     log.insertBefore(div, log.firstChild);
   }
-
+ 
   // ── Camera ───────────────────────────────────────────────────
   // Starts the moment the page loads — no sign-in step to wait on
   // anymore, so "turn it on, it's ready" is now true from the first
   // paint, matching the appliance-like feel this page is meant to have.
   window.addEventListener('load', startCamera_);
   document.getElementById('stop-btn').addEventListener('click', stopCamera_);
-
+ 
   async function startCamera_() {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1920 } } });
@@ -178,12 +181,12 @@
       setStatus('capture-status', 'Could not access the camera: ' + e.message, 'error');
     }
   }
-
+ 
   function stopCamera_() {
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     setStatus('capture-status', 'Camera stopped.', '');
   }
-
+ 
   // ── Whole-photo corner scan (2026-09-23 rewrite, see header note) ──
   // Kept in sync by hand with Walkabout's own copy in SharedJs.html — if
   // you change one, change the other.
@@ -208,7 +211,7 @@
     }
     return foundByText; // { "<shortCode>-TL": {data, location, ...}, ... }
   }
-
+ 
   // Parses one decoded string as "<shortCode>-<corner>". Returns null if
   // it doesn't match that shape (noise, or an old-format JSON code from
   // a page printed before this rewrite).
@@ -217,7 +220,7 @@
     if (!m) return null;
     return { shortCode: m[1], corner: m[2] };
   }
-
+ 
   document.getElementById('capture-btn').addEventListener('click', async () => {
     const video = document.getElementById('video');
     if (!video.videoWidth) { setStatus('capture-status', 'Camera not ready yet.', 'error'); return; }
@@ -225,11 +228,11 @@
       setStatus('capture-status', 'This page needs WEBAPP_URL and SHARED_SECRET filled in first — see the comment at the top of this file\'s source.', 'error');
       return;
     }
-
+ 
     const canvas = document.getElementById('canvas');
     canvas.width = video.videoWidth; canvas.height = video.videoHeight;
     canvas.getContext('2d').drawImage(video, 0, 0);
-
+ 
     setStatus('capture-status', 'Reading corner markers…', '');
     const rawFound = scanWholePhotoForCodes_(canvas);
     const byCorner = {};
@@ -238,7 +241,7 @@
       if (parsed) byCorner[parsed.corner] = parsed.shortCode;
     });
     const cornersFound = Object.keys(byCorner);
-
+ 
     if (cornersFound.length < 4) {
       const missing = ['TL', 'TR', 'BL', 'BR'].filter(c => !byCorner[c]);
       const msg = 'Found ' + cornersFound.length + ' of 4 corners (missing ' + missing.join(', ') + '). Retake — try better light or holding the page flatter.';
@@ -254,23 +257,29 @@
       return;
     }
     const assignmentId = byCorner.TL;
-
+ 
     setStatus('capture-status', 'Sending…', '');
     try {
       const filename = assignmentId + '__' + new Date().toISOString().replace(/[:.]/g, '-') + '.jpg';
-      await sendCapture_(canvas, filename, assignmentId);
-      setStatus('capture-status', 'Sent ' + filename + '. Ready for the next page.', 'good');
-      logLine('Sent ' + filename, 'good');
+      const result = await sendCapture_(canvas, filename, assignmentId);
+      if (result.needsMatch) {
+        const msg = 'Sent ' + filename + ', but no assignment matches "' + assignmentId + '" yet -- open Walkabout\'s Queue tab and fix it there before it can be scored.';
+        setStatus('capture-status', msg, 'warn');
+        logLine(msg, 'bad');
+      } else {
+        setStatus('capture-status', 'Sent ' + filename + '. Ready for the next page.', 'good');
+        logLine('Sent ' + filename, 'good');
+      }
     } catch (e) {
       setStatus('capture-status', 'Send failed: ' + e.message, 'error');
       logLine('Send failed (' + assignmentId + '): ' + e.message, 'bad');
     }
   });
-
+ 
   function canvasToBlob_(canvas, quality) {
     return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
   }
-
+ 
   function blobToBase64_(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -279,7 +288,7 @@
       reader.readAsDataURL(blob);
     });
   }
-
+ 
   // POSTs straight to Walkabout's own doPost (Code.js) — no Google
   // sign-in involved anywhere in this page. Sent with Content-Type
   // text/plain on purpose: that keeps this a CORS "simple request" (no
@@ -289,7 +298,7 @@
   async function sendCapture_(canvas, filename, assignmentId) {
     const blob = await canvasToBlob_(canvas, 0.85);
     const photoBase64 = await blobToBase64_(blob);
-
+ 
     const resp = await fetch(WEBAPP_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -309,3 +318,4 @@
 </script>
 </body>
 </html>
+ 
